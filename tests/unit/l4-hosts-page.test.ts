@@ -26,6 +26,7 @@ function host(overrides: Partial<L4ProxyHost>): L4ProxyHost {
     upstreams: ['forgejo:22'],
     matcherType: 'none',
     matcherValue: [],
+    regexpMatcher: null,
     tlsTermination: false,
     proxyProtocolVersion: null,
     proxyProtocolReceive: false,

@@ -127,10 +127,14 @@ describe('POST /api/instances/sync', () => {
 
   /**
    * Regression (#295): an L4 host on a port Ingressi's own Caddy listeners bind
-   * (80/443/2019) must not be applied on the replica — two listeners on the
-   * same port silently split connections via SO_REUSEPORT.
+   * must not create a second, colliding listener on the replica (SO_REUSEPORT
+   * silently splits connections between two listeners on the same port).
+   * Admin API 2019 is reserved for every protocol. The HTTP app's 80/443 are
+   * reserved only for UDP: a TCP host there is attached to the HTTP server as
+   * a `layer4` listener wrapper instead of a second listener (src/lib/caddy.ts,
+   * buildL4Servers), so it is accepted.
    */
-  it('rejects synced L4 hosts listening on reserved port 443', async () => {
+  it('accepts a TCP L4 host synced on port 443 (shared with the HTTP server)', async () => {
     const payload = makePayload();
     payload.data.l4ProxyHosts = [
       {
@@ -162,9 +166,84 @@ describe('POST /api/instances/sync', () => {
 
     const response = await POST(request);
 
+    expect(response.status).toBe(200);
+    expect(mockApplySyncPayload).toHaveBeenCalledOnce();
+  });
+
+  it('rejects a UDP L4 host synced on reserved port 443', async () => {
+    const payload = makePayload();
+    payload.data.l4ProxyHosts = [
+      {
+        id: 1,
+        name: 'QUIC passthrough',
+        protocol: 'udp',
+        listenAddress: ':443',
+        upstreams: JSON.stringify(['quic.internal:443']),
+        matcherType: 'none',
+        matcherValue: null,
+        tlsTermination: false,
+        proxyProtocolVersion: null,
+        proxyProtocolReceive: false,
+        ownerUserId: null,
+        meta: null,
+        enabled: true,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      },
+    ];
+    const request = new NextRequest('http://localhost/api/instances/sync', {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer sync-token',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    });
+
+    const response = await POST(request);
+
     expect(response.status).toBe(400);
     expect(await response.json()).toEqual({
-      error: "L4 proxy host 1: listen port 443 is reserved for Ingressi's own Caddy listeners (HTTP 80/443, admin API 2019)",
+      error: "L4 proxy host 1: listen port 443 is reserved for Ingressi's own Caddy listeners (HTTP 80/443 UDP, admin API 2019)",
+    });
+    expect(mockApplySyncPayload).not.toHaveBeenCalled();
+  });
+
+  it('rejects an L4 host synced on the admin API port 2019 regardless of protocol', async () => {
+    const payload = makePayload();
+    payload.data.l4ProxyHosts = [
+      {
+        id: 1,
+        name: 'Admin collision',
+        protocol: 'tcp',
+        listenAddress: ':2019',
+        upstreams: JSON.stringify(['internal:2019']),
+        matcherType: 'none',
+        matcherValue: null,
+        tlsTermination: false,
+        proxyProtocolVersion: null,
+        proxyProtocolReceive: false,
+        ownerUserId: null,
+        meta: null,
+        enabled: true,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      },
+    ];
+    const request = new NextRequest('http://localhost/api/instances/sync', {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer sync-token',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    });
+
+    const response = await POST(request);
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({
+      error: "L4 proxy host 1: listen port 2019 is reserved for Ingressi's own Caddy listeners (HTTP 80/443 UDP, admin API 2019)",
     });
     expect(mockApplySyncPayload).not.toHaveBeenCalled();
   });

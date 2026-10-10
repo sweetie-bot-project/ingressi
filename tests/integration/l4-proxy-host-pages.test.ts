@@ -324,8 +324,8 @@ describe('L4 host editor saves', () => {
 
   it('reports a server-side problem as an error without saving', async () => {
     const form = l4HostToForm((await getL4ProxyHost(hosts.a))!);
-    form.listenAddress = ':443';
-    expect(await updateL4ProxyHostAction(hosts.a, INITIAL_ACTION_STATE, l4FormData(form, { enabled: false }))).toMatchObject({ status: 'error', message: expect.stringMatching(/443 is reserved/) });
+    form.listenAddress = ':2019';
+    expect(await updateL4ProxyHostAction(hosts.a, INITIAL_ACTION_STATE, l4FormData(form, { enabled: false }))).toMatchObject({ status: 'error', message: expect.stringMatching(/2019 is reserved/) });
     expect((await l4Row(hosts.a))!.listenAddress).toBe(':2222');
   });
 

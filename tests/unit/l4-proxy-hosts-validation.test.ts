@@ -117,52 +117,65 @@ describe('L4 proxy host create validation', () => {
   });
 
   // -----------------------------------------------------------------------
-  // Reserved ports (issue #295): 80/443 belong to the HTTP app, 2019 to the
-  // admin API. A second L4 listener on the same port binds successfully
-  // (SO_REUSEPORT) but silently splits connections ~50/50.
+  // Reserved ports (issue #295): the admin API (2019) is reserved for every
+  // protocol. The HTTP app's 80/443 are reserved only for UDP — a TCP host
+  // there is attached to the HTTP server as a layer4 listener wrapper
+  // (src/lib/caddy.ts, buildL4Servers) instead of a second listener, so it
+  // never collides via SO_REUSEPORT the way a genuine second listener would.
   // -----------------------------------------------------------------------
 
-  it('rejects reserved port 80', async () => {
+  it('accepts a TCP host on port 80 (shared with the HTTP server)', async () => {
     const input: L4ProxyHostInput = {
       name: 'Test',
       protocol: 'tcp',
       listenAddress: ':80',
       upstreams: ['10.0.0.1:8080'],
     };
-    await expect(createL4ProxyHost(input, 1)).rejects.toThrow('Port 80 is reserved');
+    const result = await createL4ProxyHost(input, 1);
+    expect(result.listenAddress).toBe(':80');
   });
 
-  it('rejects reserved port 443', async () => {
+  it('accepts a TCP host on port 443 (shared with the HTTP server)', async () => {
     const input: L4ProxyHostInput = {
       name: 'Test',
       protocol: 'tcp',
       listenAddress: ':443',
       upstreams: ['10.0.0.1:443'],
     };
-    await expect(createL4ProxyHost(input, 1)).rejects.toThrow('Port 443 is reserved');
+    const result = await createL4ProxyHost(input, 1);
+    expect(result.listenAddress).toBe(':443');
   });
 
-  it('rejects reserved port 443 in HOST:PORT form', async () => {
+  it('accepts a TCP host on port 443 in HOST:PORT form', async () => {
     const input: L4ProxyHostInput = {
       name: 'Test',
       protocol: 'tcp',
       listenAddress: '0.0.0.0:443',
       upstreams: ['10.0.0.1:443'],
     };
-    await expect(createL4ProxyHost(input, 1)).rejects.toThrow('Port 443 is reserved');
+    const result = await createL4ProxyHost(input, 1);
+    expect(result.listenAddress).toBe('0.0.0.0:443');
   });
 
-  it('rejects reserved port 2019 (admin API)', async () => {
-    const input: L4ProxyHostInput = {
-      name: 'Test',
+  it('rejects reserved port 2019 (admin API) regardless of protocol', async () => {
+    const tcp: L4ProxyHostInput = {
+      name: 'Test TCP',
       protocol: 'tcp',
       listenAddress: ':2019',
       upstreams: ['10.0.0.1:2019'],
     };
-    await expect(createL4ProxyHost(input, 1)).rejects.toThrow('Port 2019 is reserved');
+    await expect(createL4ProxyHost(tcp, 1)).rejects.toThrow('Port 2019 is reserved');
+
+    const udp: L4ProxyHostInput = {
+      name: 'Test UDP',
+      protocol: 'udp',
+      listenAddress: ':2019',
+      upstreams: ['10.0.0.1:2019'],
+    };
+    await expect(createL4ProxyHost(udp, 1)).rejects.toThrow('Port 2019 is reserved');
   });
 
-  it('rejects reserved port for UDP protocol too', async () => {
+  it('rejects reserved port 443 for UDP protocol', async () => {
     const input: L4ProxyHostInput = {
       name: 'Test',
       protocol: 'udp',
@@ -172,7 +185,19 @@ describe('L4 proxy host create validation', () => {
     await expect(createL4ProxyHost(input, 1)).rejects.toThrow('Port 443 is reserved');
   });
 
-  it('rejects reserved port on update', async () => {
+  it('rejects reserved port 80/443 when switching an existing TCP host to UDP without changing the address', async () => {
+    const created = await createL4ProxyHost({
+      name: 'Test',
+      protocol: 'tcp',
+      listenAddress: ':443',
+      upstreams: ['10.0.0.1:443'],
+    }, 1);
+    await expect(
+      updateL4ProxyHost(created.id, { protocol: 'udp' }, 1)
+    ).rejects.toThrow('Port 443 is reserved');
+  });
+
+  it('rejects reserved port on update to the admin API port', async () => {
     const created = await createL4ProxyHost({
       name: 'Test',
       protocol: 'tcp',
@@ -180,8 +205,19 @@ describe('L4 proxy host create validation', () => {
       upstreams: ['10.0.0.1:443'],
     }, 1);
     await expect(
-      updateL4ProxyHost(created.id, { listenAddress: ':443' }, 1)
-    ).rejects.toThrow('Port 443 is reserved');
+      updateL4ProxyHost(created.id, { listenAddress: ':2019' }, 1)
+    ).rejects.toThrow('Port 2019 is reserved');
+  });
+
+  it('accepts updating the listen address of an existing TCP host to port 443', async () => {
+    const created = await createL4ProxyHost({
+      name: 'Test',
+      protocol: 'tcp',
+      listenAddress: ':8443',
+      upstreams: ['10.0.0.1:443'],
+    }, 1);
+    const updated = await updateL4ProxyHost(created.id, { listenAddress: ':443' }, 1);
+    expect(updated.listenAddress).toBe(':443');
   });
 
   it('accepts a port adjacent to the reserved range', async () => {

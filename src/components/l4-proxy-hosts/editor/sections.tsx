@@ -11,6 +11,20 @@ import { ChoiceCards } from "@/components/ui/ChoiceCards";
 import { AddButton, ChipInput, EditorCard, FieldError, RemoveButton, TextField, ToggleRow, useFieldProps } from "@/src/components/proxy-hosts/editor/fields";
 import { SegmentedField, SelectField } from "@/src/components/proxy-hosts/editor/controls";
 import { L4_LB_POLICIES, type L4Form, type L4Policy, type L4SectionId } from "./model";
+import { L4_REGEXP_MAX_COUNT, MSSQL_TDS_PRELOGIN_REGEXP } from "@/src/lib/l4-matchers";
+import type { L4MatcherType } from "@/src/lib/models/l4-proxy-hosts";
+
+const PROTOCOL_SIGNATURE_HELP: Partial<Record<L4MatcherType, string>> = {
+  ssh: 'Matches connections that begin with the SSH identification string ("SSH-"). The client sends its banner first, which OpenSSH does.',
+  rdp: "Matches the RDP (X.224/TPKT) connection request.",
+  socks4: "Matches a SOCKS4/4a CONNECT or BIND request.",
+  socks5: "Matches a SOCKS5 client greeting.",
+  wireguard: "Matches a WireGuard handshake initiation or keepalive message. WireGuard normally runs over UDP.",
+  xmpp: "Matches an XMPP stream opening tag.",
+  postgres: "Matches a PostgreSQL startup/SSLRequest message.",
+  winbox: "Matches a MikroTik Winbox authentication request.",
+  openvpn: "Matches an OpenVPN control channel handshake (TCP or UDP).",
+};
 
 export type L4SectionProps = {
   form: L4Form;
@@ -93,6 +107,8 @@ export function RoutingSection(props: L4SectionProps) {
       return { ...f, upstreams: [...f.upstreams.slice(0, index), ...replacement, ...f.upstreams.slice(index + 1)] };
     });
   const named = form.matcherType === "tls_sni" || form.matcherType === "http_host";
+  const isRegexp = form.matcherType === "regexp";
+  const protocolSignatureHelp = PROTOCOL_SIGNATURE_HELP[form.matcherType];
   return (
     <>
       {nameSection === "routing" && <NameAndTagsCard {...props} />}
@@ -115,7 +131,11 @@ export function RoutingSection(props: L4SectionProps) {
             value={form.listenAddress}
             onChange={(listenAddress) => update((f) => ({ ...f, listenAddress }))}
             placeholder=":5432"
-            hint=":PORT or HOST:PORT. Ports 80, 443 and 2019 are Caddy's own."
+            hint={
+              form.protocol === "udp"
+                ? ":PORT or HOST:PORT. Ports 80, 443 and 2019 are Caddy's own."
+                : ":PORT or HOST:PORT. Port 2019 is Caddy's own; 80 and 443 share Caddy's own HTTP server."
+            }
             mono
           />
         </div>
@@ -146,6 +166,16 @@ export function RoutingSection(props: L4SectionProps) {
             <option value="tls_sni">TLS SNI</option>
             <option value="http_host">HTTP host</option>
             <option value="proxy_protocol">PROXY protocol header</option>
+            <option value="ssh" disabled={form.protocol === "udp"}>SSH</option>
+            <option value="rdp" disabled={form.protocol === "udp"}>RDP</option>
+            <option value="socks4" disabled={form.protocol === "udp"}>SOCKS4</option>
+            <option value="socks5" disabled={form.protocol === "udp"}>SOCKS5</option>
+            <option value="wireguard">WireGuard</option>
+            <option value="xmpp">XMPP</option>
+            <option value="postgres" disabled={form.protocol === "udp"}>PostgreSQL</option>
+            <option value="winbox" disabled={form.protocol === "udp"}>Winbox (MikroTik)</option>
+            <option value="openvpn">OpenVPN</option>
+            <option value="regexp">Raw bytes (regexp)</option>
           </SelectField>
           {named && (
             <div className="flex min-w-0 flex-col gap-1.5">
@@ -162,7 +192,54 @@ export function RoutingSection(props: L4SectionProps) {
               />
             </div>
           )}
+          {protocolSignatureHelp && <p className="m-0 text-[13px] text-muted-foreground">{protocolSignatureHelp}</p>}
         </div>
+        {isRegexp && (
+          <div className="mt-3 flex flex-col gap-3 border-t border-line pt-3">
+            <TextField
+              id="l4-matcher-value"
+              label="Pattern"
+              value={form.matcherValue[0] ?? ""}
+              onChange={(value) => update((f) => ({ ...f, matcherValue: [value] }))}
+              placeholder={MSSQL_TDS_PRELOGIN_REGEXP.pattern}
+              hint="Go (RE2) regular expression, evaluated against the first bytes of the connection. Anchor it with ^."
+              mono
+            />
+            <div className={grid}>
+              <TextField
+                id="l4-regexp-count"
+                label="Bytes to inspect"
+                value={form.regexpCount}
+                onChange={(value) => update((f) => ({ ...f, regexpCount: value }))}
+                placeholder="8"
+                hint={`1-${L4_REGEXP_MAX_COUNT}. The connection is closed if the client sends fewer within the matching timeout.`}
+              />
+              <ToggleRow
+                id="l4-regexp-hex"
+                label="Match hex encoding"
+                description="Compare the pattern against the uppercase hex encoding of the bytes, not the raw bytes."
+                checked={form.regexpHex}
+                onChange={(regexpHex) => update((f) => ({ ...f, regexpHex }))}
+              />
+            </div>
+            <div>
+              <button
+                type="button"
+                className="inline-flex h-8 items-center rounded-lg border border-line2 bg-panel2 px-3 text-[13px] transition-colors hover:bg-raise"
+                onClick={() =>
+                  update((f) => ({
+                    ...f,
+                    matcherValue: [MSSQL_TDS_PRELOGIN_REGEXP.pattern],
+                    regexpCount: String(MSSQL_TDS_PRELOGIN_REGEXP.count),
+                    regexpHex: MSSQL_TDS_PRELOGIN_REGEXP.hex,
+                  }))
+                }
+              >
+                Use MSSQL (TDS PRELOGIN) preset
+              </button>
+            </div>
+          </div>
+        )}
       </EditorCard>
 
       <EditorCard id="tls-and-proxy-protocol" title="TLS and PROXY protocol">

@@ -5,8 +5,9 @@
  * data the L4 host actions read (app/(dashboard)/l4-proxy-hosts/actions.ts).
  * Pure functions.
  */
-import type { L4ProxyHost } from "@/src/lib/models/l4-proxy-hosts";
-import { extractL4ListenPort, RESERVED_L4_PORTS } from "@/src/lib/l4-reserved-ports";
+import type { L4MatcherType, L4ProxyHost } from "@/src/lib/models/l4-proxy-hosts";
+import { extractL4ListenPort, isReservedL4Port } from "@/src/lib/l4-reserved-ports";
+import { L4_REGEXP_DEFAULT_COUNT, L4_TCP_ONLY_MATCHER_TYPES } from "@/src/lib/l4-matchers";
 
 export type L4SectionId = "routing" | "load-balancing" | "security" | "advanced";
 
@@ -40,8 +41,10 @@ export type L4Form = {
   protocol: "tcp" | "udp";
   listenAddress: string;
   upstreams: string[];
-  matcherType: "none" | "tls_sni" | "http_host" | "proxy_protocol";
+  matcherType: L4MatcherType;
   matcherValue: string[];
+  regexpHex: boolean;
+  regexpCount: string;
   tlsTermination: boolean;
   proxyProtocolReceive: boolean;
   proxyProtocolVersion: "" | "v1" | "v2";
@@ -82,6 +85,8 @@ export function newL4Form(scopeTags: readonly string[] = []): L4Form {
     upstreams: [""],
     matcherType: "none",
     matcherValue: [],
+    regexpHex: false,
+    regexpCount: String(L4_REGEXP_DEFAULT_COUNT),
     tlsTermination: false,
     proxyProtocolReceive: false,
     proxyProtocolVersion: "",
@@ -127,6 +132,8 @@ export function l4HostToForm(host: L4ProxyHost): L4Form {
     upstreams: host.upstreams.length > 0 ? [...host.upstreams] : [""],
     matcherType: host.matcherType,
     matcherValue: [...host.matcherValue],
+    regexpHex: host.regexpMatcher?.hex ?? false,
+    regexpCount: String(host.regexpMatcher?.count ?? L4_REGEXP_DEFAULT_COUNT),
     tlsTermination: host.protocol === "tcp" && host.tlsTermination,
     proxyProtocolReceive: host.proxyProtocolReceive,
     proxyProtocolVersion: host.proxyProtocolVersion ?? "",
@@ -207,8 +214,14 @@ export function validateL4Form(form: L4Form, nameSection: L4SectionId): L4FieldE
   } else {
     const port = extractL4ListenPort(listen);
     if (port === null) errors["l4-listen"] = { message: "Use :PORT or HOST:PORT, with a port from 1 to 65535.", section: "routing" };
-    else if ((RESERVED_L4_PORTS as readonly number[]).includes(port))
-      errors["l4-listen"] = { message: `Port ${port} is Caddy's own (80, 443 and 2019 are reserved).`, section: "routing" };
+    else if (isReservedL4Port(listen, form.protocol))
+      errors["l4-listen"] = {
+        message:
+          form.protocol === "udp"
+            ? `Port ${port} is Caddy's own (80, 443 and 2019 are reserved for UDP).`
+            : `Port ${port} is Caddy's admin API.`,
+        section: "routing",
+      };
   }
   const upstreams = filled(form.upstreams);
   if (upstreams.length === 0) errors["l4-up-0"] = { message: "Add at least one upstream.", section: "routing" };
@@ -218,6 +231,15 @@ export function validateL4Form(form: L4Form, nameSection: L4SectionId): L4FieldE
   });
   if ((form.matcherType === "tls_sni" || form.matcherType === "http_host") && filled(form.matcherValue).length === 0) {
     errors["l4-matcher-value"] = { message: "Add at least one server name to match.", section: "routing" };
+  }
+  if (form.matcherType === "regexp") {
+    if (!form.matcherValue[0]?.trim()) errors["l4-matcher-value"] = { message: "Enter a pattern to match.", section: "routing" };
+    if (form.regexpCount.trim() && !/^\d+$/.test(form.regexpCount.trim())) {
+      errors["l4-regexp-count"] = { message: "Bytes to inspect is a whole number.", section: "routing" };
+    }
+  }
+  if (form.protocol === "udp" && L4_TCP_ONLY_MATCHER_TYPES.includes(form.matcherType as (typeof L4_TCP_ONLY_MATCHER_TYPES)[number])) {
+    errors["l4-matcher"] = { message: "This matcher needs TCP.", section: "routing" };
   }
   const numeric = (id: string, value: string, section: L4SectionId, what: string) => {
     if (value.trim() && !/^\d+$/.test(value.trim())) errors[id] = { message: `${what} is a whole number.`, section };
@@ -251,7 +273,12 @@ export function l4FormChanges(saved: L4Form, form: L4Form, nameSection: L4Sectio
   check("routing", "Protocol", saved.protocol, form.protocol);
   check("routing", "Listen address", saved.listenAddress.trim(), form.listenAddress.trim());
   check("routing", "Upstreams", filled(saved.upstreams), filled(form.upstreams));
-  check("routing", "Matcher", [saved.matcherType, filled(saved.matcherValue)], [form.matcherType, filled(form.matcherValue)]);
+  check(
+    "routing",
+    "Matcher",
+    [saved.matcherType, filled(saved.matcherValue), saved.regexpHex, saved.regexpCount.trim()],
+    [form.matcherType, filled(form.matcherValue), form.regexpHex, form.regexpCount.trim()]
+  );
   check("routing", "TLS termination", saved.protocol === "tcp" && saved.tlsTermination, form.protocol === "tcp" && form.tlsTermination);
   check("routing", "Inbound PROXY protocol", saved.proxyProtocolReceive, form.proxyProtocolReceive);
   check("routing", "PROXY protocol to the upstream", saved.proxyProtocolVersion, form.proxyProtocolVersion);
@@ -286,6 +313,11 @@ export function l4FormData(form: L4Form, options: { enabled: boolean } = { enabl
   set("upstreams", filled(form.upstreams).join("\n"));
   set("matcherType", form.matcherType);
   if (form.matcherType === "tls_sni" || form.matcherType === "http_host") set("matcherValue", filled(form.matcherValue).join(", "));
+  if (form.matcherType === "regexp") {
+    set("matcherValue", (form.matcherValue[0] ?? "").trim());
+    on("regexpHex", form.regexpHex);
+    if (form.regexpCount.trim()) set("regexpCount", form.regexpCount.trim());
+  }
   on("tlsTermination", form.protocol === "tcp" && form.tlsTermination);
   on("proxyProtocolReceive", form.proxyProtocolReceive);
   if (form.proxyProtocolVersion) set("proxyProtocolVersion", form.proxyProtocolVersion);
@@ -339,7 +371,8 @@ export function l4FormData(form: L4Form, options: { enabled: boolean } = { enabl
 export function l4FieldOfServerError(message: string, nameSection: L4SectionId): { id: string; section: L4SectionId } | null {
   if (/listen address|port \d+ is reserved|port must be|already (uses|listens)|port .* in use/i.test(message)) return { id: "l4-listen", section: "routing" };
   if (/upstream/i.test(message)) return { id: "l4-up-0", section: "routing" };
-  if (/matcher value/i.test(message)) return { id: "l4-matcher-value", section: "routing" };
+  if (/matcher value|requires a pattern|requires exactly one pattern|invalid regexp|regexp pattern|bytes to inspect/i.test(message)) return { id: "l4-matcher-value", section: "routing" };
+  if (/matcher is only supported with tcp/i.test(message)) return { id: "l4-matcher", section: "routing" };
   if (/name is required/i.test(message)) return { id: "l4-name", section: nameSection };
   if (/tag/i.test(message)) return { id: "l4-tags", section: nameSection };
   return null;

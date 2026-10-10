@@ -41,6 +41,7 @@ const host: L4ProxyHost = {
   upstreams: ['10.0.0.53:853'],
   matcherType: 'tls_sni',
   matcherValue: ['dns.example.com'],
+  regexpMatcher: null,
   tlsTermination: true,
   proxyProtocolVersion: null,
   proxyProtocolReceive: false,
@@ -71,9 +72,9 @@ describe('L4 host editor model', () => {
     expect(Object.keys(validateL4Form(blank, 'routing')).sort()).toEqual(['l4-listen', 'l4-name', 'l4-up-0']);
     expect(validateL4Form(blank, 'advanced')['l4-name'].section).toBe('advanced');
 
-    const form = { ...l4HostToForm(host), listenAddress: ':443', upstreams: ['10.0.0.53'], matcherValue: [] };
+    const form = { ...l4HostToForm(host), listenAddress: ':2019', upstreams: ['10.0.0.53'], matcherValue: [] };
     const errors = validateL4Form(form, 'advanced');
-    expect(errors['l4-listen'].message).toMatch(/443 is Caddy's own/);
+    expect(errors['l4-listen'].message).toMatch(/2019 is Caddy's admin API/);
     expect(errors['l4-up-0'].message).toMatch(/host:port/);
     expect(errors['l4-matcher-value'].section).toBe('routing');
     expect(validateL4Form({ ...l4HostToForm(host), listenAddress: 'db' }, 'advanced')['l4-listen'].message).toMatch(/:PORT/);
@@ -137,7 +138,7 @@ describe('L4 host editor render', () => {
     expect(html).not.toContain('href="#overview"');
     expect(html).toContain('Name and tags');
     expect(html).toMatch(/<label[^>]*for="l4-listen"[^>]*>Listen address/);
-    expect(html).toContain("Ports 80, 443 and 2019 are Caddy&#x27;s own.");
+    expect(html).toContain("Port 2019 is Caddy&#x27;s own; 80 and 443 share Caddy&#x27;s own HTTP server.");
     expect(html).toContain('aria-label="Upstream 1"');
     expect(html).toContain('data-testid="host-editor-bar"');
     expect(html).toContain('Create host');

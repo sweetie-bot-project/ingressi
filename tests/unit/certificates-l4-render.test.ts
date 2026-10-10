@@ -274,6 +274,7 @@ describe('L4 hosts page', () => {
     upstreams: ['adguard:53'],
     matcherType: 'tls_sni',
     matcherValue: ['dns.example.com'],
+    regexpMatcher: null,
     tlsTermination: true,
     proxyProtocolVersion: null,
     proxyProtocolReceive: false,

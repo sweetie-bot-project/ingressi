@@ -1,7 +1,8 @@
 import { appDb, nowIso, toIso } from "../db";
 import { applyCaddyConfig } from "../caddy";
 import { CaddyApplyError } from "../caddy-apply-error";
-import { RESERVED_L4_PORTS } from "../l4-reserved-ports";
+import { extractL4ListenPort, isReservedL4Port, RESERVED_L4_ADMIN_PORT } from "../l4-reserved-ports";
+import { L4_TCP_ONLY_MATCHER_TYPES, normalizeL4RegexpMatcher, validateL4RegexpMatcher, type L4RegexpMatcherConfig } from "../l4-matchers";
 import { logAuditEvent } from "../audit";
 import { l4ProxyHosts } from "../db/schema";
 import { and, eq, count, or, type SQL } from "drizzle-orm";
@@ -12,7 +13,9 @@ import { assertHostCreateApproved, assertHostDeleteApproved, assertHostUpdateApp
 import { asc, containsText, desc } from "@/src/lib/db/ops";
 
 export type L4Protocol = "tcp" | "udp";
-export type L4MatcherType = "none" | "tls_sni" | "http_host" | "proxy_protocol";
+export type L4MatcherType =
+  | "none" | "tls_sni" | "http_host" | "proxy_protocol" | "ssh" | "regexp"
+  | "rdp" | "socks4" | "socks5" | "wireguard" | "xmpp" | "postgres" | "winbox" | "openvpn";
 export type L4ProxyProtocolVersion = "v1" | "v2";
 
 export type L4LoadBalancingPolicy = "random" | "round_robin" | "least_conn" | "ip_hash" | "first";
@@ -107,6 +110,7 @@ export type L4ProxyHostMeta = {
   upstream_dns_resolution?: L4UpstreamDnsResolutionMeta;
   geoblock?: L4GeoBlockConfig;
   geoblock_mode?: L4GeoBlockMode;
+  regexp_matcher?: Partial<L4RegexpMatcherConfig>;
 };
 
 const VALID_L4_LB_POLICIES: L4LoadBalancingPolicy[] = ["random", "round_robin", "least_conn", "ip_hash", "first"];
@@ -130,6 +134,8 @@ export type L4ProxyHost = {
   upstreamDnsResolution: L4UpstreamDnsResolutionConfig | null;
   geoblock: L4GeoBlockConfig | null;
   geoblockMode: L4GeoBlockMode;
+  /** Parameters of the "regexp" matcher (pattern itself is matcherValue[0]); null for other matcher types. */
+  regexpMatcher: L4RegexpMatcherConfig | null;
   /** Free-form tags (src/lib/host-tags.ts); a custom role can be scoped to them. */
   tags: string[];
   createdAt: string;
@@ -153,12 +159,16 @@ export type L4ProxyHostInput = {
   upstreamDnsResolution?: Partial<L4UpstreamDnsResolutionConfig> | null;
   geoblock?: L4GeoBlockConfig | null;
   geoblockMode?: L4GeoBlockMode;
+  regexpMatcher?: Partial<L4RegexpMatcherConfig> | null;
   /** Free-form tags; an array of strings (or a comma-separated string). */
   tags?: string[] | null;
 };
 
 const VALID_PROTOCOLS: L4Protocol[] = ["tcp", "udp"];
-const VALID_MATCHER_TYPES: L4MatcherType[] = ["none", "tls_sni", "http_host", "proxy_protocol"];
+const VALID_MATCHER_TYPES: L4MatcherType[] = [
+  "none", "tls_sni", "http_host", "proxy_protocol", "ssh", "regexp",
+  "rdp", "socks4", "socks5", "wireguard", "xmpp", "postgres", "winbox", "openvpn",
+];
 const VALID_PROXY_PROTOCOL_VERSIONS: L4ProxyProtocolVersion[] = ["v1", "v2"];
 
 function safeJsonParse<T>(value: string | null, fallback: T): T {
@@ -372,6 +382,7 @@ function parseL4ProxyHost(row: L4ProxyHostRow): L4ProxyHost {
     upstreamDnsResolution: hydrateL4UpstreamDnsResolution(meta.upstream_dns_resolution),
     geoblock: meta.geoblock?.enabled ? meta.geoblock : null,
     geoblockMode: meta.geoblock_mode ?? "merge",
+    regexpMatcher: row.matcherType === "regexp" ? normalizeL4RegexpMatcher(meta.regexp_matcher) : null,
     tags: parseStoredTags(row.tags),
     createdAt: toIso(row.createdAt)!,
     updatedAt: toIso(row.updatedAt)!,
@@ -386,7 +397,11 @@ export {
   isReservedL4Port,
 } from "../l4-reserved-ports";
 
-function validateL4Input(input: L4ProxyHostInput | Partial<L4ProxyHostInput>, isCreate: boolean) {
+function validateL4Input(
+  input: L4ProxyHostInput | Partial<L4ProxyHostInput>,
+  isCreate: boolean,
+  effectiveProtocol?: L4Protocol
+) {
   if (isCreate) {
     if (!input.name?.trim()) {
       throw new Error("Name is required");
@@ -413,9 +428,14 @@ function validateL4Input(input: L4ProxyHostInput | Partial<L4ProxyHostInput>, is
     if (port < 1 || port > 65535) {
       throw new Error("Port must be between 1 and 65535");
     }
-    if ((RESERVED_L4_PORTS as readonly number[]).includes(port)) {
+    // Conservative fallback (udp) only matters when a caller omits both the
+    // override and input.protocol, which doesn't happen on the paths below.
+    const protocolForPortCheck = effectiveProtocol ?? input.protocol ?? "udp";
+    if (isReservedL4Port(addr, protocolForPortCheck)) {
       throw new Error(
-        `Port ${port} is reserved for ${brandName()}'s own Caddy listeners (HTTP 80/443, admin API 2019) and cannot be used for L4 proxy hosts. Choose a different port.`
+        protocolForPortCheck === "udp"
+          ? `Port ${port} is reserved for ${brandName()}'s own Caddy listeners (HTTP 80/443, admin API ${RESERVED_L4_ADMIN_PORT}) and cannot be used for a UDP L4 proxy host. Choose a different port.`
+          : `Port ${port} is reserved for ${brandName()}'s admin API and cannot be used for an L4 proxy host. Choose a different port.`
       );
     }
   }
@@ -431,6 +451,23 @@ function validateL4Input(input: L4ProxyHostInput | Partial<L4ProxyHostInput>, is
   if (input.matcherType === "tls_sni" || input.matcherType === "http_host") {
     if (!input.matcherValue || input.matcherValue.length === 0) {
       throw new Error("Matcher value is required for TLS SNI and HTTP Host matchers");
+    }
+  }
+
+  if (input.matcherType === "regexp") {
+    if (!input.matcherValue || input.matcherValue.length !== 1) {
+      throw new Error("Regexp matcher requires exactly one pattern");
+    }
+    validateL4RegexpMatcher(input.matcherValue[0], input.regexpMatcher);
+  }
+
+  if (input.matcherType !== undefined) {
+    const protocolForMatcherCheck = effectiveProtocol ?? input.protocol;
+    if (
+      protocolForMatcherCheck === "udp" &&
+      L4_TCP_ONLY_MATCHER_TYPES.includes(input.matcherType as (typeof L4_TCP_ONLY_MATCHER_TYPES)[number])
+    ) {
+      throw new Error(`${input.matcherType} matcher is only supported with TCP protocol`);
     }
   }
 
@@ -543,6 +580,7 @@ export async function createL4ProxyHost(input: L4ProxyHostInput, actorUserId: nu
         if (input.upstreamDnsResolution) meta.upstream_dns_resolution = dehydrateL4UpstreamDnsResolution(input.upstreamDnsResolution);
         if (input.geoblock) meta.geoblock = input.geoblock;
         if (input.geoblockMode && input.geoblockMode !== "merge") meta.geoblock_mode = input.geoblockMode;
+        if (input.matcherType === "regexp") meta.regexp_matcher = normalizeL4RegexpMatcher(input.regexpMatcher);
         return Object.keys(meta).length > 0 ? JSON.stringify(meta) : null;
       })(),
       enabled: input.enabled ?? true,
@@ -592,18 +630,40 @@ export async function updateL4ProxyHost(id: number, input: Partial<L4ProxyHostIn
   // For validation, merge with existing to check cross-field constraints
   const merged = {
     protocol: input.protocol ?? existing.protocol,
+    listenAddress: input.listenAddress ?? existing.listenAddress,
     tlsTermination: input.tlsTermination ?? existing.tlsTermination,
     matcherType: input.matcherType ?? existing.matcherType,
     matcherValue: input.matcherValue ?? existing.matcherValue,
+    regexpMatcher: input.regexpMatcher ?? existing.regexpMatcher,
   };
+  // A protocol-only change (no listenAddress in this input) still needs this:
+  // an existing TCP host on :80/:443 is valid (shared with the HTTP server),
+  // but flipping it to UDP without touching the address would silently turn
+  // it into a second, colliding listener (issue #295) that validateL4Input's
+  // own listenAddress-gated check below would never see.
+  if (isReservedL4Port(merged.listenAddress, merged.protocol)) {
+    const port = extractL4ListenPort(merged.listenAddress);
+    throw new Error(
+      `Port ${port} is reserved for ${brandName()}'s own Caddy listeners and cannot be used for a ${merged.protocol.toUpperCase()} L4 proxy host. Choose a different port or protocol.`
+    );
+  }
   if (merged.tlsTermination && merged.protocol === "udp") {
     throw new Error("TLS termination is only supported with TCP protocol");
   }
   if ((merged.matcherType === "tls_sni" || merged.matcherType === "http_host") && merged.matcherValue.length === 0) {
     throw new Error("Matcher value is required for TLS SNI and HTTP Host matchers");
   }
+  if (merged.matcherType === "regexp") {
+    if (merged.matcherValue.length !== 1) {
+      throw new Error("Regexp matcher requires exactly one pattern");
+    }
+    validateL4RegexpMatcher(merged.matcherValue[0], merged.regexpMatcher);
+  }
+  if (merged.protocol === "udp" && L4_TCP_ONLY_MATCHER_TYPES.includes(merged.matcherType as (typeof L4_TCP_ONLY_MATCHER_TYPES)[number])) {
+    throw new Error(`${merged.matcherType} matcher is only supported with TCP protocol`);
+  }
 
-  validateL4Input(input, false);
+  validateL4Input(input, false, merged.protocol);
   const tags = input.tags !== undefined ? normalizeTags(input.tags) : undefined;
 
   const now = nowIso();
@@ -632,7 +692,9 @@ export async function updateL4ProxyHost(id: number, input: Partial<L4ProxyHostIn
           input.dnsResolver !== undefined ||
           input.upstreamDnsResolution !== undefined ||
           input.geoblock !== undefined ||
-          input.geoblockMode !== undefined;
+          input.geoblockMode !== undefined ||
+          input.regexpMatcher !== undefined ||
+          input.matcherType !== undefined;
         if (!hasMetaChanges) return {};
 
         // Start from existing meta
@@ -642,6 +704,7 @@ export async function updateL4ProxyHost(id: number, input: Partial<L4ProxyHostIn
           ...(existing.upstreamDnsResolution ? { upstream_dns_resolution: dehydrateL4UpstreamDnsResolution(existing.upstreamDnsResolution) } : {}),
           ...(existing.geoblock ? { geoblock: existing.geoblock } : {}),
           ...(existing.geoblockMode !== "merge" ? { geoblock_mode: existing.geoblockMode } : {}),
+          ...(existing.regexpMatcher ? { regexp_matcher: existing.regexpMatcher } : {}),
         };
 
         // Apply direct meta override if provided
@@ -685,6 +748,13 @@ export async function updateL4ProxyHost(id: number, input: Partial<L4ProxyHostIn
           } else {
             delete meta.geoblock_mode;
           }
+        }
+
+        // The regexp parameters only make sense for the regexp matcher.
+        if (merged.matcherType === "regexp") {
+          meta.regexp_matcher = normalizeL4RegexpMatcher(input.regexpMatcher ?? existing.regexpMatcher);
+        } else {
+          delete meta.regexp_matcher;
         }
 
         return { meta: Object.keys(meta).length > 0 ? JSON.stringify(meta) : null };

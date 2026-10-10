@@ -25,7 +25,7 @@ Links that open the list with something prepared: `/l4-proxy-hosts?search=<text>
 `/l4-proxy-hosts/<id>` has one header (name, status, listen address and protocol, server names, tags, **Duplicate** and **Enable**/**Disable**) and one row of tabs, laid out like a [proxy host's page](proxy-host-editor.md):
 
 - **Overview**: the settings of each tab in plain words, with an **Edit** link to that tab, and the upstreams. A port the host needs that is not published yet is named at the top (see [Ports](#ports)).
-- **Routing**: protocol and listen address, upstreams (one host:port per row; a pasted list fills several rows), the matcher (none, TLS SNI or HTTP Host with the names to match, or a PROXY protocol header), TLS termination (TCP only) and the PROXY protocol in and out. A new host's name and tags are here too.
+- **Routing**: protocol and listen address, upstreams (one host:port per row; a pasted list fills several rows), the matcher (none; TLS SNI or HTTP Host with the names to match; a PROXY protocol header; a protocol signature — SSH, RDP, SOCKS4/5, WireGuard, XMPP, PostgreSQL, MikroTik Winbox or OpenVPN; or raw bytes, a Go regular expression matched against the connection's first bytes, with a bundled MSSQL/TDS PRELOGIN preset), TLS termination (TCP only) and the PROXY protocol in and out. A new host's name and tags are here too.
 - **Load balancing**: the policy, how long to keep trying another upstream, and active and passive health checks.
 - **Security**: geo blocking.
 - **Advanced**: name and tags, DNS resolvers and upstream DNS pinning.
@@ -37,7 +37,7 @@ The tabs switch in place and are linkable (`#routing`, `#security` …, or a car
 
 ## Ports
 
-Each L4 host listens on a port of the Caddy container, and Docker publishes a container's ports only when it creates the container. When a host needs a port that is not published yet, the page names it (or counts them, with **Show ports** listing each with its hosts, when there are more than three) and offers **Publish ports now**: the L4 port manager sidecar recreates the Caddy container with the new ports, which interrupts all traffic through Caddy for a few seconds. A port no host uses any more stays published until the container is recreated; the page offers that too. Ports 80, 443 and 2019 are Caddy's own and cannot be used.
+Each L4 host listens on a port of the Caddy container, and Docker publishes a container's ports only when it creates the container. When a host needs a port that is not published yet, the page names it (or counts them, with **Show ports** listing each with its hosts, when there are more than three) and offers **Publish ports now**: the L4 port manager sidecar recreates the Caddy container with the new ports, which interrupts all traffic through Caddy for a few seconds. A port no host uses any more stays published until the container is recreated; the page offers that too. Port 2019 (the admin API) is Caddy's own and cannot be used by any L4 host. Ports 80 and 443 (the HTTP app) cannot be used by a UDP host, but a TCP host on 80 or 443 is allowed and already published — it shares Caddy's own HTTP listener instead of needing a port of its own, which is how SSH, a database protocol, or any other non-HTTP TCP traffic can sit on the same port as your HTTPS proxy hosts. Give it a matcher other than *None* so it does not catch the HTTPS traffic meant for them.
 
 ## Settings worth knowing
 

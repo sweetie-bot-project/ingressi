@@ -3760,10 +3760,23 @@ const spec = {
           id: { type: "integer" },
           name: { type: "string" },
           protocol: { type: "string", enum: ["tcp", "udp"] },
-          listenAddress: { type: "string", example: ":5432", description: "Single host:port or :port to listen on. Ports 80, 443 and 2019 are reserved for Caddy's own listeners and are rejected." },
+          listenAddress: { type: "string", example: ":5432", description: "Single host:port or :port to listen on. Port 2019 (admin API) is always rejected. Ports 80/443 are rejected for UDP; a TCP host there shares Caddy's own HTTP server instead of a second listener." },
           upstreams: { type: "array", items: { type: "string" }, example: ["db-server:5432"] },
-          matcherType: { type: "string", enum: ["none", "tls_sni", "http_host", "proxy_protocol"] },
-          matcherValue: { type: "array", items: { type: "string" }, description: "Match values for tls_sni / http_host (empty otherwise)" },
+          matcherType: { type: "string", enum: ["none", "tls_sni", "http_host", "proxy_protocol", "ssh", "regexp", "rdp", "socks4", "socks5", "wireguard", "xmpp", "postgres", "winbox", "openvpn"] },
+          matcherValue: { type: "array", items: { type: "string" }, description: "Match values: hostnames for tls_sni / http_host, a single Go (RE2) pattern for regexp (empty otherwise)" },
+          regexpMatcher: {
+            oneOf: [
+              {
+                type: "object",
+                properties: {
+                  hex: { type: "boolean", description: "Match the uppercase hex encoding of the bytes instead of the raw bytes" },
+                  count: { type: "integer", minimum: 1, maximum: 16384, default: 8, description: "Bytes to read before matching" },
+                },
+              },
+              { type: "null" },
+            ],
+            description: "Parameters for matcherType=regexp; null for other matcher types",
+          },
           tlsTermination: { type: "boolean" },
           proxyProtocolVersion: { type: ["string", "null"], enum: ["v1", "v2", null] },
           proxyProtocolReceive: { type: "boolean", description: "Trust inbound PROXY protocol header from upstream LBs" },
@@ -3784,10 +3797,22 @@ const spec = {
         properties: {
           name: { type: "string", example: "PostgreSQL Proxy" },
           protocol: { type: "string", enum: ["tcp", "udp"] },
-          listenAddress: { type: "string", example: ":5432", description: "Single host:port or :port. Ports 80, 443 and 2019 are reserved and rejected." },
+          listenAddress: { type: "string", example: ":5432", description: "Single host:port or :port. Port 2019 (admin API) is always rejected. Ports 80/443 are rejected for UDP; a TCP host there shares Caddy's own HTTP server instead of a second listener." },
           upstreams: { type: "array", items: { type: "string" }, example: ["db:5432"] },
-          matcherType: { type: "string", enum: ["none", "tls_sni", "http_host", "proxy_protocol"] },
+          matcherType: { type: "string", enum: ["none", "tls_sni", "http_host", "proxy_protocol", "ssh", "regexp", "rdp", "socks4", "socks5", "wireguard", "xmpp", "postgres", "winbox", "openvpn"] },
           matcherValue: { type: "array", items: { type: "string" } },
+          regexpMatcher: {
+            oneOf: [
+              {
+                type: "object",
+                properties: {
+                  hex: { type: "boolean" },
+                  count: { type: "integer", minimum: 1, maximum: 16384 },
+                },
+              },
+              { type: "null" },
+            ],
+          },
           tlsTermination: { type: "boolean" },
           proxyProtocolVersion: { type: ["string", "null"], enum: ["v1", "v2", null] },
           proxyProtocolReceive: { type: "boolean" },

@@ -41,7 +41,10 @@ function changeRequestState(gate: GateOutcome): ActionState {
 }
 
 const VALID_PROTOCOLS: L4Protocol[] = ["tcp", "udp"];
-const VALID_MATCHER_TYPES: L4MatcherType[] = ["none", "tls_sni", "http_host", "proxy_protocol"];
+const VALID_MATCHER_TYPES: L4MatcherType[] = [
+  "none", "tls_sni", "http_host", "proxy_protocol", "ssh", "regexp",
+  "rdp", "socks4", "socks5", "wireguard", "xmpp", "postgres", "winbox", "openvpn",
+];
 const VALID_PP_VERSIONS: L4ProxyProtocolVersion[] = ["v1", "v2"];
 const VALID_L4_LB_POLICIES: L4LoadBalancingPolicy[] = ["random", "round_robin", "least_conn", "ip_hash", "first"];
 const VALID_DNS_FAMILIES = ["ipv6", "ipv4", "both"] as const;
@@ -178,6 +181,24 @@ function parseProxyProtocolVersion(formData: FormData): L4ProxyProtocolVersion |
   return null;
 }
 
+/** Hostnames are comma-separated; a regexp is one opaque string (it may contain commas, e.g. `{2,4}`). */
+function parseMatcherValue(formData: FormData, matcherType: L4MatcherType): string[] {
+  if (matcherType === "tls_sni" || matcherType === "http_host") return parseCsv(formData.get("matcherValue"));
+  if (matcherType === "regexp") {
+    const pattern = parseOptionalText(formData.get("matcherValue"));
+    return pattern ? [pattern] : [];
+  }
+  return [];
+}
+
+function parseRegexpMatcher(formData: FormData, matcherType: L4MatcherType): L4ProxyHostInput["regexpMatcher"] {
+  if (matcherType !== "regexp") return undefined;
+  return {
+    hex: parseCheckbox(formData.get("regexpHex")),
+    count: parseOptionalNumber(formData.get("regexpCount")) ?? undefined,
+  };
+}
+
 export async function createL4ProxyHostAction(
   _prevState: ActionState = INITIAL_ACTION_STATE,
   formData: FormData
@@ -188,9 +209,7 @@ export async function createL4ProxyHostAction(
     const userId = Number(session.user.id);
 
     const matcherType = parseMatcherType(formData);
-    const matcherValue = (matcherType === "tls_sni" || matcherType === "http_host")
-      ? parseCsv(formData.get("matcherValue"))
-      : [];
+    const matcherValue = parseMatcherValue(formData, matcherType);
 
     const input: L4ProxyHostInput = {
       name: String(formData.get("name") ?? "Untitled"),
@@ -199,6 +218,7 @@ export async function createL4ProxyHostAction(
       upstreams: parseUpstreams(formData.get("upstreams")),
       matcherType: matcherType,
       matcherValue: matcherValue,
+      regexpMatcher: parseRegexpMatcher(formData, matcherType),
       tlsTermination: parseCheckbox(formData.get("tlsTermination")),
       proxyProtocolVersion: parseProxyProtocolVersion(formData),
       proxyProtocolReceive: parseCheckbox(formData.get("proxyProtocolReceive")),
@@ -248,9 +268,7 @@ export async function updateL4ProxyHostAction(
     const existing = await getL4ProxyHostInScope(session.access, id);
 
     const matcherType = parseMatcherType(formData);
-    const matcherValue = (matcherType === "tls_sni" || matcherType === "http_host")
-      ? parseCsv(formData.get("matcherValue"))
-      : [];
+    const matcherValue = parseMatcherValue(formData, matcherType);
 
     const input: Partial<L4ProxyHostInput> = {
       name: formData.get("name") ? String(formData.get("name")) : undefined,
@@ -259,6 +277,7 @@ export async function updateL4ProxyHostAction(
       upstreams: formData.get("upstreams") ? parseUpstreams(formData.get("upstreams")) : undefined,
       matcherType: matcherType,
       matcherValue: matcherValue,
+      regexpMatcher: parseRegexpMatcher(formData, matcherType),
       tlsTermination: parseCheckbox(formData.get("tlsTermination")),
       proxyProtocolVersion: parseProxyProtocolVersion(formData),
       proxyProtocolReceive: parseCheckbox(formData.get("proxyProtocolReceive")),

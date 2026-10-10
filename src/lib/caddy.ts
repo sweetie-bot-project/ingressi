@@ -53,6 +53,7 @@ import {
 } from "./settings";
 import { buildDefaultResponseRoute } from "./caddy-default-response";
 import { isReservedL4Port } from "./l4-reserved-ports";
+import { buildL4MatcherSet } from "./l4-matchers";
 import { buildDnsChallengeConfig, type DnsProviderCredentials } from "./dns-providers";
 import { syncInstances } from "./instance-sync";
 import { deferCaddyApplyToBatch } from "./change-batch";
@@ -476,6 +477,7 @@ type L4Meta = {
   upstream_dns_resolution?: UpstreamDnsResolutionMeta;
   geoblock?: GeoBlockSettings;
   geoblock_mode?: GeoBlockMode;
+  regexp_matcher?: { hex?: boolean; count?: number };
 };
 
 type ProxyHostAuthentikMeta = {
@@ -2786,30 +2788,65 @@ export function buildL4LoadBalancerHandlerConfig(meta: LoadBalancerMeta | undefi
   return result;
 }
 
-async function buildL4Servers(): Promise<Record<string, unknown> | null> {
-  const l4Hosts = await appDb
+type L4BuildResult = {
+  /** Standalone layer4 app servers (ports no HTTP server listens on). */
+  servers: Record<string, unknown>;
+  /**
+   * Routes for TCP ports the HTTP server (servers.ingressi) already listens
+   * on, keyed by port. They are emitted as a `layer4` listener wrapper on
+   * that server: matched connections are handled at L4, everything else
+   * falls through to the normal TLS/HTTP handling. A second listener on the
+   * same port would race the HTTP server for connections.
+   */
+  listenerWrapperRoutes: Map<string, Record<string, unknown>[]>;
+};
+
+/** Port of a `:PORT` / `0.0.0.0:PORT` / `[::]:PORT` listen address that shares the HTTP wildcard listener, else null. */
+function wildcardListenPort(listenAddress: string): string | null {
+  const m = listenAddress.trim().match(/^(?:0\.0\.0\.0|\[::\])?:(\d+)$/);
+  return m ? m[1] : null;
+}
+
+async function buildL4Servers(httpListenPorts: string[] = []): Promise<L4BuildResult | null> {
+  const enabledL4Hosts = await appDb
     .select()
     .from(l4ProxyHosts)
     .where(eq(l4ProxyHosts.enabled, true))
     // In id order: the servers' names (srv0, srv1, ...) follow it.
     .orderBy(l4ProxyHosts.id);
 
-  if (l4Hosts.length === 0) return null;
+  if (enabledL4Hosts.length === 0) return null;
 
   // Safety net for rows created before reserved-port validation (issue #295):
-  // an L4 host on :80/:443/:2019 would share a listener with the dashboard's own HTTP
-  // app or admin API (SO_REUSEPORT makes the bind succeed but silently splits
-  // connections). Skip them so one legacy row cannot break every other host.
-  const l4HostsFiltered = l4Hosts.filter((host) => {
-    if (isReservedL4Port(host.listenAddress)) {
+  // a UDP host (or any protocol) on :2019, or a UDP host on :80/:443, would
+  // share a listener with the dashboard's own HTTP app or admin API
+  // (SO_REUSEPORT makes the bind succeed but silently splits connections). A
+  // TCP host on :80/:443 is fine — it is attached below as a listener
+  // wrapper, never a second listener. Skip genuinely unsafe legacy rows so
+  // one of them cannot break every other host.
+  const l4HostsFiltered = enabledL4Hosts.filter((host) => {
+    if (isReservedL4Port(host.listenAddress, host.protocol as "tcp" | "udp")) {
       console.warn(
-        `[l4] Skipping L4 proxy host "${host.name}" (id ${host.id}): listen address ${host.listenAddress} uses a reserved port (80/443/2019). Edit the host to use a different port.`
+        `[l4] Skipping L4 proxy host "${host.name}" (id ${host.id}): listen address ${host.listenAddress} uses a reserved port. Edit the host to use a different port.`
       );
       return false;
     }
     return true;
   });
   if (l4HostsFiltered.length === 0) return null;
+
+  // Routes are tried in order, so a matcher-less (catch-all) host would shadow
+  // every host after it. Keep the configured order but push catch-alls last.
+  const isCatchAll = (h: (typeof l4HostsFiltered)[number]) =>
+    buildL4MatcherSet(
+      h.matcherType as string,
+      h.matcherValue ? parseJson<string[]>(h.matcherValue, []) : [],
+      parseJson<L4Meta>(h.meta, {}).regexp_matcher
+    ) === null;
+  const l4Hosts = [
+    ...l4HostsFiltered.filter((h) => !isCatchAll(h)),
+    ...l4HostsFiltered.filter((h) => isCatchAll(h)),
+  ];
 
   const [globalDnsSettings, globalUpstreamDnsResolutionSettings, globalGeoBlock] = await Promise.all([
     getDnsSettings(),
@@ -2818,14 +2855,15 @@ async function buildL4Servers(): Promise<Record<string, unknown> | null> {
   ]);
 
   // Group hosts by listen address — multiple hosts on the same port share routes in one server
-  const serverMap = new Map<string, typeof l4HostsFiltered>();
-  for (const host of l4HostsFiltered) {
+  const serverMap = new Map<string, typeof l4Hosts>();
+  for (const host of l4Hosts) {
     const key = host.listenAddress;
     if (!serverMap.has(key)) serverMap.set(key, []);
     serverMap.get(key)!.push(host);
   }
 
   const servers: Record<string, unknown> = {};
+  const listenerWrapperRoutes = new Map<string, Record<string, unknown>[]>();
   let serverIdx = 0;
   for (const [listenAddr, hosts] of serverMap) {
     const routes: Record<string, unknown>[] = [];
@@ -2833,21 +2871,16 @@ async function buildL4Servers(): Promise<Record<string, unknown> | null> {
     for (const host of hosts) {
       const route: Record<string, unknown> = {};
 
-      // Build matchers
-      const matcherType = host.matcherType as string;
-      const matcherValues = host.matcherValue ? parseJson<string[]>(host.matcherValue, []) : [];
-
-      if (matcherType === "tls_sni" && matcherValues.length > 0) {
-        route.match = [{ tls: { sni: matcherValues } }];
-      } else if (matcherType === "http_host" && matcherValues.length > 0) {
-        route.match = [{ http: [{ host: matcherValues }] }];
-      } else if (matcherType === "proxy_protocol") {
-        route.match = [{ proxy_protocol: {} }];
-      }
-      // "none" = no match block (catch-all)
-
       // Parse per-host meta for load balancing, DNS resolver, and upstream DNS resolution
       const meta = parseJson<L4Meta>(host.meta, {});
+
+      // Build matchers ("none" = no match block, i.e. catch-all)
+      const matcherSet = buildL4MatcherSet(
+        host.matcherType as string,
+        host.matcherValue ? parseJson<string[]>(host.matcherValue, []) : [],
+        meta.regexp_matcher
+      );
+      if (matcherSet) route.match = [matcherSet];
 
       // DNS resolver config
       const dnsConfig = parseDnsResolverConfig(meta.dns_resolver);
@@ -2960,6 +2993,15 @@ async function buildL4Servers(): Promise<Record<string, unknown> | null> {
     // Determine protocol from the hosts on this listen address.
     // All hosts sharing a listen address must use the same protocol.
     const protocol = hosts[0].protocol as string;
+
+    // TCP on a port the HTTP server already owns (typically :443): attach as a
+    // listener wrapper instead of a competing layer4 server.
+    const sharedPort = protocol === "udp" ? null : wildcardListenPort(listenAddr);
+    if (sharedPort && httpListenPorts.includes(sharedPort)) {
+      listenerWrapperRoutes.set(sharedPort, [...(listenerWrapperRoutes.get(sharedPort) ?? []), ...routes]);
+      continue;
+    }
+
     const listenValue = protocol === "udp" ? `udp/${listenAddr}` : listenAddr;
 
     servers[`l4_server_${serverIdx++}`] = {
@@ -2968,7 +3010,7 @@ async function buildL4Servers(): Promise<Record<string, unknown> | null> {
     };
   }
 
-  return servers;
+  return { servers, listenerWrapperRoutes };
 }
 
 /**
@@ -3337,10 +3379,27 @@ async function buildCaddyDocumentFromDatabase() {
   // client-IP attribution for access logs, analytics and downstream handlers.
   const serverTrustedProxies = buildServerTrustedProxies(trustedProxiesSettings);
 
+  // L4 (TCP/UDP) proxy servers. TCP hosts on a port the HTTP server listens on
+  // are attached to it as a layer4 listener wrapper (see buildL4Servers).
+  const ingressiListen = mainRoutes.length > 0 ? (hasTls ? [":80", ":443"] : [":80"]) : [];
+  const l4Build = await buildL4Servers(ingressiListen.map((addr) => addr.slice(1)));
+  const l4WrapperRoutes = Array.from(l4Build?.listenerWrapperRoutes.values() ?? []).flat();
+
   // Main HTTP/HTTPS server for proxy hosts
   if (mainRoutes.length > 0) {
     servers.ingressi = {
-      listen: hasTls ? [":80", ":443"] : [":80"],
+      listen: ingressiListen,
+      // caddy-l4 sees the raw TCP stream first; connections no route claims
+      // (plain HTTPS, ACME, ...) are handed on unchanged, with their buffered
+      // bytes, to the TLS/HTTP handling below. The `tls` wrapper must be
+      // listed explicitly AFTER layer4: left implicit, Caddy places it
+      // nearest the socket and layer4 would then try to match
+      // already-decrypted bytes. Caddy applies server-level wrappers to
+      // every listener of the server, so these routes are reachable on all
+      // of `listen`, not only the port the L4 host names.
+      ...(l4WrapperRoutes.length > 0
+        ? { listener_wrappers: [{ wrapper: "layer4", routes: l4WrapperRoutes }, { wrapper: "tls" }] }
+        : {}),
       routes: mainRoutes,
       // Only disable automatic HTTPS if we have TLS automation policies
       // This allows Caddy to handle HTTP-01 challenges for managed certificates
@@ -3436,9 +3495,8 @@ async function buildCaddyDocumentFromDatabase() {
   }
   const loggingApp = { logging: { logs: loggingLogs } };
 
-  // Build L4 (TCP/UDP) proxy servers
-  const l4Servers = await buildL4Servers();
-  const l4App = l4Servers ? { layer4: { servers: l4Servers } } : {};
+  const l4Servers = l4Build?.servers ?? {};
+  const l4App = Object.keys(l4Servers).length > 0 ? { layer4: { servers: l4Servers } } : {};
 
   // Shared certificate storage (ee/high-availability): Caddy nodes that use
   // the same storage share certificates, locks and challenge tokens. Absent

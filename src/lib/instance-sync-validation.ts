@@ -250,14 +250,20 @@ function isL4ProxyHost(value: unknown): value is NonNullable<SyncPayload["data"]
 
 /**
  * Validate semantic content of L4 proxy host fields. The listen port must not
- * collide with the ports Ingressi's generated Caddy config always binds itself
- * (HTTP 80/443, admin API 2019) — two listeners on the same port silently
- * split connections via SO_REUSEPORT (issue #295).
+ * collide with a port Ingressi's generated Caddy config always binds itself:
+ * admin API 2019 (any protocol), or the HTTP app's 80/443 for UDP — a TCP
+ * host there is attached as a listener wrapper instead of a second listener,
+ * so it doesn't collide (see src/lib/caddy.ts, buildL4Servers). Two
+ * listeners on the same port otherwise silently split connections via
+ * SO_REUSEPORT (issue #295).
  */
 function validateL4ProxyHostContent(host: Record<string, unknown>): string | null {
-  if (isString(host.listenAddress) && isReservedL4Port(host.listenAddress)) {
+  // Only a literal "tcp" gets the permissive (listener-wrapper) treatment —
+  // anything else, including a malformed value, keeps the conservative default.
+  const protocol = host.protocol === "tcp" ? "tcp" : "udp";
+  if (isString(host.listenAddress) && isReservedL4Port(host.listenAddress, protocol)) {
     const port = extractL4ListenPort(host.listenAddress);
-    return `L4 proxy host ${host.id}: listen port ${port} is reserved for ${brandName()}'s own Caddy listeners (HTTP 80/443, admin API 2019)`;
+    return `L4 proxy host ${host.id}: listen port ${port} is reserved for ${brandName()}'s own Caddy listeners (HTTP 80/443 UDP, admin API 2019)`;
   }
   return null;
 }
