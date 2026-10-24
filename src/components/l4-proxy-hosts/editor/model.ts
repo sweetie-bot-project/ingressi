@@ -7,7 +7,7 @@
  */
 import type { L4MatcherType, L4ProxyHost } from "@/src/lib/models/l4-proxy-hosts";
 import { extractL4ListenPort, isReservedL4Port } from "@/src/lib/l4-reserved-ports";
-import { L4_REGEXP_DEFAULT_COUNT, L4_TCP_ONLY_MATCHER_TYPES } from "@/src/lib/l4-matchers";
+import { validateL4TlsAlpn, L4_REGEXP_DEFAULT_COUNT, L4_TCP_ONLY_MATCHER_TYPES } from "@/src/lib/l4-matchers";
 
 export type L4SectionId = "routing" | "load-balancing" | "security" | "advanced";
 
@@ -43,6 +43,7 @@ export type L4Form = {
   upstreams: string[];
   matcherType: L4MatcherType;
   matcherValue: string[];
+  tlsAlpn: string[];
   regexpHex: boolean;
   regexpCount: string;
   tlsTermination: boolean;
@@ -85,6 +86,7 @@ export function newL4Form(scopeTags: readonly string[] = []): L4Form {
     upstreams: [""],
     matcherType: "none",
     matcherValue: [],
+    tlsAlpn: [],
     regexpHex: false,
     regexpCount: String(L4_REGEXP_DEFAULT_COUNT),
     tlsTermination: false,
@@ -132,6 +134,7 @@ export function l4HostToForm(host: L4ProxyHost): L4Form {
     upstreams: host.upstreams.length > 0 ? [...host.upstreams] : [""],
     matcherType: host.matcherType,
     matcherValue: [...host.matcherValue],
+    tlsAlpn: [...(host.tlsAlpn ?? [])],
     regexpHex: host.regexpMatcher?.hex ?? false,
     regexpCount: String(host.regexpMatcher?.count ?? L4_REGEXP_DEFAULT_COUNT),
     tlsTermination: host.protocol === "tcp" && host.tlsTermination,
@@ -232,6 +235,11 @@ export function validateL4Form(form: L4Form, nameSection: L4SectionId): L4FieldE
   if ((form.matcherType === "tls_sni" || form.matcherType === "http_host") && filled(form.matcherValue).length === 0) {
     errors["l4-matcher-value"] = { message: "Add at least one server name to match.", section: "routing" };
   }
+  if (form.matcherType === "tls_sni") {
+    try { validateL4TlsAlpn(form.tlsAlpn); } catch (error) {
+      errors["l4-tls-alpn"] = { message: (error as Error).message, section: "routing" };
+    }
+  }
   if (form.matcherType === "regexp") {
     if (!form.matcherValue[0]?.trim()) errors["l4-matcher-value"] = { message: "Enter a pattern to match.", section: "routing" };
     if (form.regexpCount.trim() && !/^\d+$/.test(form.regexpCount.trim())) {
@@ -276,8 +284,8 @@ export function l4FormChanges(saved: L4Form, form: L4Form, nameSection: L4Sectio
   check(
     "routing",
     "Matcher",
-    [saved.matcherType, filled(saved.matcherValue), saved.regexpHex, saved.regexpCount.trim()],
-    [form.matcherType, filled(form.matcherValue), form.regexpHex, form.regexpCount.trim()]
+    [saved.matcherType, filled(saved.matcherValue), saved.tlsAlpn, saved.regexpHex, saved.regexpCount.trim()],
+    [form.matcherType, filled(form.matcherValue), form.tlsAlpn, form.regexpHex, form.regexpCount.trim()]
   );
   check("routing", "TLS termination", saved.protocol === "tcp" && saved.tlsTermination, form.protocol === "tcp" && form.tlsTermination);
   check("routing", "Inbound PROXY protocol", saved.proxyProtocolReceive, form.proxyProtocolReceive);
@@ -312,6 +320,7 @@ export function l4FormData(form: L4Form, options: { enabled: boolean } = { enabl
   set("listenAddress", form.listenAddress.trim());
   set("upstreams", filled(form.upstreams).join("\n"));
   set("matcherType", form.matcherType);
+  if (form.matcherType === "tls_sni") set("tlsAlpn", form.tlsAlpn.join(","));
   if (form.matcherType === "tls_sni" || form.matcherType === "http_host") set("matcherValue", filled(form.matcherValue).join(", "));
   if (form.matcherType === "regexp") {
     set("matcherValue", (form.matcherValue[0] ?? "").trim());
@@ -370,6 +379,7 @@ export function l4FormData(form: L4Form, options: { enabled: boolean } = { enabl
 /** The field a server error is about, so the editor can show it there; null when it is about none. */
 export function l4FieldOfServerError(message: string, nameSection: L4SectionId): { id: string; section: L4SectionId } | null {
   if (/listen address|port \d+ is reserved|port must be|already (uses|listens)|port .* in use/i.test(message)) return { id: "l4-listen", section: "routing" };
+  if (/TLS ALPN/i.test(message)) return { id: "l4-tls-alpn", section: "routing" };
   if (/upstream/i.test(message)) return { id: "l4-up-0", section: "routing" };
   if (/matcher value|requires a pattern|requires exactly one pattern|invalid regexp|regexp pattern|bytes to inspect/i.test(message)) return { id: "l4-matcher-value", section: "routing" };
   if (/matcher is only supported with tcp/i.test(message)) return { id: "l4-matcher", section: "routing" };

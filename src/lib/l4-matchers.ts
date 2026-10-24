@@ -89,6 +89,15 @@ function escapeCaddyPlaceholders(pattern: string): string {
   return pattern.replace(/\{/g, "\\{");
 }
 
+/** ALPN protocol IDs are opaque, case-sensitive bytes; reject Caddy placeholders. */
+export function validateL4TlsAlpn(value: unknown): asserts value is string[] {
+  if (!Array.isArray(value) || value.length > 32 || value.some((v) =>
+    typeof v !== "string" || !/^[\x21-\x7e]{1,255}$/.test(v) || /[{}]/.test(v)
+  )) {
+    throw new Error("TLS ALPN must be an array of up to 32 printable protocol IDs (1–255 bytes, no braces)");
+  }
+}
+
 /**
  * Build the caddy-l4 matcher set (one entry of route.match) for a host, or
  * null when the host matches every connection.
@@ -96,11 +105,12 @@ function escapeCaddyPlaceholders(pattern: string): string {
 export function buildL4MatcherSet(
   matcherType: string,
   matcherValues: string[],
-  regexp: Partial<L4RegexpMatcherConfig> | null | undefined
+  regexp: Partial<L4RegexpMatcherConfig> | null | undefined,
+  tlsAlpn: string[] = []
 ): Record<string, unknown> | null {
   switch (matcherType) {
     case "tls_sni":
-      return matcherValues.length > 0 ? { tls: { sni: matcherValues } } : null;
+      return matcherValues.length > 0 ? { tls: { sni: matcherValues, ...(tlsAlpn.length ? { alpn: tlsAlpn } : {}) } } : null;
     case "http_host":
       return matcherValues.length > 0 ? { http: [{ host: matcherValues }] } : null;
     case "proxy_protocol":

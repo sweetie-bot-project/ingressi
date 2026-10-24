@@ -92,6 +92,31 @@ describe('L4 hosts sharing the HTTP port', () => {
     expect(doc.apps.layer4).toBeUndefined();
   });
 
+  it('persists ALPN, combines it with SNI, negotiates it on termination, and clears it', async () => {
+    const host = await createL4ProxyHost({ ...ldaps, matcherValue: ['service.example.com'],
+      tlsAlpn: ['custom-db'], tlsTermination: true, upstreams: ['db.internal:5432'] }, 1);
+    const routes = async () => ((await buildCaddyDocument()) as unknown as Doc)
+      .apps.http!.servers!.ingressi!.listener_wrappers![0].routes!;
+    expect(host.tlsAlpn).toEqual(['custom-db']);
+    expect(await routes()).toEqual([{
+      match: [{ tls: { sni: ['service.example.com'], alpn: ['custom-db'] } }],
+      handle: [{ handler: 'tls', connection_policies: [{ alpn: ['custom-db'] }] },
+        { handler: 'proxy', upstreams: [{ dial: ['db.internal:5432'] }] }],
+    }]);
+    expect((await updateL4ProxyHost(host.id, { name: 'renamed' }, 1)).tlsAlpn).toEqual(['custom-db']);
+    await updateL4ProxyHost(host.id, { tlsAlpn: [] }, 1);
+    expect((await routes())[0].match).toEqual([{ tls: { sni: ['service.example.com'] } }]);
+    await updateL4ProxyHost(host.id, { tlsAlpn: ['h2'], tlsTermination: false }, 1);
+    expect((await routes())[0].handle).toEqual([{ handler: 'proxy', upstreams: [{ dial: ['db.internal:5432'] }] }]);
+    expect((await updateL4ProxyHost(host.id, { matcherType: 'ssh' }, 1)).tlsAlpn).toEqual([]);
+  });
+
+  it.each([{ value: [''] }, { value: ['{placeholder}'] }, { value: ['with space'] }, { value: ['x'.repeat(256)] }, { value: 'h2' }, { value: [42] }])(
+    'rejects invalid ALPN %j through structured input and raw metadata', async ({ value }) => {
+      await expect(createL4ProxyHost({ ...ldaps, tlsAlpn: value as string[] }, 1)).rejects.toThrow('TLS ALPN');
+      await expect(createL4ProxyHost({ ...ldaps, meta: { tls_alpn: value as string[] } }, 1)).rejects.toThrow('TLS ALPN');
+    });
+
   it('keeps ports the HTTP server does not own as standalone layer4 servers', async () => {
     await createL4ProxyHost({ ...ssh, listenAddress: ':2222' }, 1);
     const doc = (await buildCaddyDocument()) as unknown as Doc;

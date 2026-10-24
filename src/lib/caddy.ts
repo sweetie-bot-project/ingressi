@@ -477,6 +477,7 @@ type L4Meta = {
   upstream_dns_resolution?: UpstreamDnsResolutionMeta;
   geoblock?: GeoBlockSettings;
   geoblock_mode?: GeoBlockMode;
+  tls_alpn?: string[];
   regexp_matcher?: { hex?: boolean; count?: number };
 };
 
@@ -2841,7 +2842,8 @@ async function buildL4Servers(httpListenPorts: string[] = []): Promise<L4BuildRe
     buildL4MatcherSet(
       h.matcherType as string,
       h.matcherValue ? parseJson<string[]>(h.matcherValue, []) : [],
-      parseJson<L4Meta>(h.meta, {}).regexp_matcher
+      parseJson<L4Meta>(h.meta, {}).regexp_matcher,
+      parseJson<L4Meta>(h.meta, {}).tls_alpn
     ) === null;
   const l4Hosts = [
     ...l4HostsFiltered.filter((h) => !isCatchAll(h)),
@@ -2878,7 +2880,8 @@ async function buildL4Servers(httpListenPorts: string[] = []): Promise<L4BuildRe
       const matcherSet = buildL4MatcherSet(
         host.matcherType as string,
         host.matcherValue ? parseJson<string[]>(host.matcherValue, []) : [],
-        meta.regexp_matcher
+        meta.regexp_matcher,
+        meta.tls_alpn
       );
       if (matcherSet) route.match = [matcherSet];
 
@@ -2902,7 +2905,12 @@ async function buildL4Servers(httpListenPorts: string[] = []): Promise<L4BuildRe
 
       // 2. TLS termination
       if (host.tlsTermination) {
-        handlers.push({ handler: "tls" });
+        handlers.push({
+          handler: "tls",
+          ...(host.matcherType === "tls_sni" && meta.tls_alpn?.length
+            ? { connection_policies: [{ alpn: meta.tls_alpn }] }
+            : {}),
+        });
       }
 
       // 3. Proxy handler

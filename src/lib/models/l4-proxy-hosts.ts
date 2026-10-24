@@ -2,7 +2,7 @@ import { appDb, nowIso, toIso } from "../db";
 import { applyCaddyConfig } from "../caddy";
 import { CaddyApplyError } from "../caddy-apply-error";
 import { extractL4ListenPort, isReservedL4Port, RESERVED_L4_ADMIN_PORT } from "../l4-reserved-ports";
-import { L4_TCP_ONLY_MATCHER_TYPES, normalizeL4RegexpMatcher, validateL4RegexpMatcher, type L4RegexpMatcherConfig } from "../l4-matchers";
+import { validateL4TlsAlpn, L4_TCP_ONLY_MATCHER_TYPES, normalizeL4RegexpMatcher, validateL4RegexpMatcher, type L4RegexpMatcherConfig } from "../l4-matchers";
 import { logAuditEvent } from "../audit";
 import { l4ProxyHosts } from "../db/schema";
 import { and, eq, count, or, type SQL } from "drizzle-orm";
@@ -110,6 +110,7 @@ export type L4ProxyHostMeta = {
   upstream_dns_resolution?: L4UpstreamDnsResolutionMeta;
   geoblock?: L4GeoBlockConfig;
   geoblock_mode?: L4GeoBlockMode;
+  tls_alpn?: string[];
   regexp_matcher?: Partial<L4RegexpMatcherConfig>;
 };
 
@@ -136,6 +137,7 @@ export type L4ProxyHost = {
   geoblockMode: L4GeoBlockMode;
   /** Parameters of the "regexp" matcher (pattern itself is matcherValue[0]); null for other matcher types. */
   regexpMatcher: L4RegexpMatcherConfig | null;
+  tlsAlpn?: string[];
   /** Free-form tags (src/lib/host-tags.ts); a custom role can be scoped to them. */
   tags: string[];
   createdAt: string;
@@ -149,6 +151,7 @@ export type L4ProxyHostInput = {
   upstreams: string[];
   matcherType?: L4MatcherType;
   matcherValue?: string[];
+  tlsAlpn?: string[];
   tlsTermination?: boolean;
   proxyProtocolVersion?: L4ProxyProtocolVersion | null;
   proxyProtocolReceive?: boolean;
@@ -382,6 +385,7 @@ function parseL4ProxyHost(row: L4ProxyHostRow): L4ProxyHost {
     upstreamDnsResolution: hydrateL4UpstreamDnsResolution(meta.upstream_dns_resolution),
     geoblock: meta.geoblock?.enabled ? meta.geoblock : null,
     geoblockMode: meta.geoblock_mode ?? "merge",
+    tlsAlpn: row.matcherType === "tls_sni" ? (meta.tls_alpn ?? []) : [],
     regexpMatcher: row.matcherType === "regexp" ? normalizeL4RegexpMatcher(meta.regexp_matcher) : null,
     tags: parseStoredTags(row.tags),
     createdAt: toIso(row.createdAt)!,
@@ -453,6 +457,9 @@ function validateL4Input(
       throw new Error("Matcher value is required for TLS SNI and HTTP Host matchers");
     }
   }
+
+  if (input.tlsAlpn !== undefined) validateL4TlsAlpn(input.tlsAlpn);
+  if (input.meta?.tls_alpn !== undefined) validateL4TlsAlpn(input.meta.tls_alpn);
 
   if (input.matcherType === "regexp") {
     if (!input.matcherValue || input.matcherValue.length !== 1) {
@@ -580,6 +587,11 @@ export async function createL4ProxyHost(input: L4ProxyHostInput, actorUserId: nu
         if (input.upstreamDnsResolution) meta.upstream_dns_resolution = dehydrateL4UpstreamDnsResolution(input.upstreamDnsResolution);
         if (input.geoblock) meta.geoblock = input.geoblock;
         if (input.geoblockMode && input.geoblockMode !== "merge") meta.geoblock_mode = input.geoblockMode;
+        if (input.matcherType === "tls_sni") {
+          const alpn = input.tlsAlpn ?? meta.tls_alpn ?? [];
+          if (alpn.length) meta.tls_alpn = alpn;
+          else delete meta.tls_alpn;
+        } else delete meta.tls_alpn;
         if (input.matcherType === "regexp") meta.regexp_matcher = normalizeL4RegexpMatcher(input.regexpMatcher);
         return Object.keys(meta).length > 0 ? JSON.stringify(meta) : null;
       })(),
@@ -693,6 +705,7 @@ export async function updateL4ProxyHost(id: number, input: Partial<L4ProxyHostIn
           input.upstreamDnsResolution !== undefined ||
           input.geoblock !== undefined ||
           input.geoblockMode !== undefined ||
+          input.tlsAlpn !== undefined ||
           input.regexpMatcher !== undefined ||
           input.matcherType !== undefined;
         if (!hasMetaChanges) return {};
@@ -704,6 +717,7 @@ export async function updateL4ProxyHost(id: number, input: Partial<L4ProxyHostIn
           ...(existing.upstreamDnsResolution ? { upstream_dns_resolution: dehydrateL4UpstreamDnsResolution(existing.upstreamDnsResolution) } : {}),
           ...(existing.geoblock ? { geoblock: existing.geoblock } : {}),
           ...(existing.geoblockMode !== "merge" ? { geoblock_mode: existing.geoblockMode } : {}),
+          ...(existing.tlsAlpn?.length ? { tls_alpn: existing.tlsAlpn } : {}),
           ...(existing.regexpMatcher ? { regexp_matcher: existing.regexpMatcher } : {}),
         };
 
@@ -748,6 +762,15 @@ export async function updateL4ProxyHost(id: number, input: Partial<L4ProxyHostIn
           } else {
             delete meta.geoblock_mode;
           }
+        }
+
+        if (merged.matcherType === "tls_sni") {
+          const alpn = input.tlsAlpn ?? meta.tls_alpn ?? [];
+          validateL4TlsAlpn(alpn);
+          if (alpn.length) meta.tls_alpn = alpn;
+          else delete meta.tls_alpn;
+        } else {
+          delete meta.tls_alpn;
         }
 
         // The regexp parameters only make sense for the regexp matcher.

@@ -192,6 +192,15 @@ export function RoutingSection(props: L4SectionProps) {
               />
             </div>
           )}
+          {form.matcherType === "tls_sni" && (
+            <div className="flex min-w-0 flex-col gap-1.5">
+              <span className="text-[13px] font-medium leading-5">ALPN protocols (optional)</span>
+              <ChipInput id="l4-tls-alpn" label="Add an ALPN protocol" listLabel="ALPN protocols"
+                values={form.tlsAlpn} onChange={(tlsAlpn) => update((f) => ({ ...f, tlsAlpn }))}
+                placeholder="h2, http/1.1" addLabel="Add" normalize={(value) => value.trim()} />
+              <p className="m-0 text-[13px] text-muted-foreground">Match SNI and any listed ALPN protocol. Empty matches every ALPN, including absent.</p>
+            </div>
+          )}
           {protocolSignatureHelp && <p className="m-0 text-[13px] text-muted-foreground">{protocolSignatureHelp}</p>}
         </div>
         {isRegexp && (

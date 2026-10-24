@@ -174,3 +174,16 @@ describe('L4 host editor render', () => {
     expect(html).not.toContain('aria-label="Edit routing"');
   });
 });
+
+describe('TLS ALPN editor settings', () => {
+  it('round trips case-sensitive protocols and tracks unsaved edits', () => {
+    const saved = l4HostToForm({ ...host, tlsAlpn: ['custom-DB'] });
+    expect(saved.tlsAlpn).toEqual(['custom-DB']);
+    expect(l4FormData(saved).get('tlsAlpn')).toBe('custom-DB');
+    expect(l4FormChanges(saved, { ...saved, tlsAlpn: ['h2'] }, 'advanced'))
+      .toContainEqual({ section: 'routing', label: 'Matcher' });
+    expect(validateL4Form({ ...saved, tlsAlpn: ['bad protocol'] }, 'advanced')['l4-tls-alpn']).toBeDefined();
+    expect(l4FormData({ ...saved, matcherType: 'ssh' }).has('tlsAlpn')).toBe(false);
+    expect(l4FieldOfServerError('TLS ALPN must be an array', 'advanced')?.id).toBe('l4-tls-alpn');
+  });
+});

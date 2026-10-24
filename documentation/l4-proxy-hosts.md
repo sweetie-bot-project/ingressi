@@ -49,3 +49,16 @@ Each L4 host listens on a port of the Caddy container, and Docker publishes a co
 The list and a host's page need `l4_proxy_hosts:read`; the editor (`/l4-proxy-hosts/new` and the tabs of a host's page), deleting and publishing ports need `l4_proxy_hosts:write` ([custom roles](../ee/docs/custom-roles.md)).
 
 The REST API has the same hosts at `/api/v1/l4-proxy-hosts` (see `/api/v1/openapi.json`).
+
+### TLS ALPN with SNI
+
+TLS SNI hosts can optionally specify `tlsAlpn` (GUI: **ALPN protocols**).
+The host matches its SNI names AND any offered protocol ID in that list.
+Protocol IDs are case-sensitive; an empty list leaves ALPN unrestricted.
+With TLS termination enabled, the same IDs configure the TLS handler's
+negotiated ALPN. Without termination, TLS passes through unchanged.
+More specific routes must precede broader SNI routes on the same listener.
+For example, hosts sharing an SNI name can route clients offering `h2` or
+`http/1.1` to an HTTP backend and clients offering a custom protocol ID to
+another TCP backend. HTTPS clients may omit ALPN, so provide a suitable
+fallback rather than assuming an absent ALPN identifies another protocol.

@@ -3764,6 +3764,7 @@ const spec = {
           upstreams: { type: "array", items: { type: "string" }, example: ["db-server:5432"] },
           matcherType: { type: "string", enum: ["none", "tls_sni", "http_host", "proxy_protocol", "ssh", "regexp", "rdp", "socks4", "socks5", "wireguard", "xmpp", "postgres", "winbox", "openvpn"] },
           matcherValue: { type: "array", items: { type: "string" }, description: "Match values: hostnames for tls_sni / http_host, a single Go (RE2) pattern for regexp (empty otherwise)" },
+          tlsAlpn: { type: "array", maxItems: 32, items: { type: "string", minLength: 1, maxLength: 255 }, description: "Optional case-sensitive ALPN protocol IDs for tls_sni; SNI AND any ALPN must match. Empty means no ALPN restriction." },
           regexpMatcher: {
             oneOf: [
               {
@@ -3801,6 +3802,7 @@ const spec = {
           upstreams: { type: "array", items: { type: "string" }, example: ["db:5432"] },
           matcherType: { type: "string", enum: ["none", "tls_sni", "http_host", "proxy_protocol", "ssh", "regexp", "rdp", "socks4", "socks5", "wireguard", "xmpp", "postgres", "winbox", "openvpn"] },
           matcherValue: { type: "array", items: { type: "string" } },
+          tlsAlpn: { type: "array", maxItems: 32, items: { type: "string", minLength: 1, maxLength: 255 }, description: "Optional case-sensitive ALPN protocol IDs for tls_sni; SNI AND any ALPN must match. Empty means no ALPN restriction." },
           regexpMatcher: {
             oneOf: [
               {
