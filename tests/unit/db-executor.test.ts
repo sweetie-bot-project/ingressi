@@ -22,6 +22,7 @@ import {
   setTransactionWatchdog,
   TransactionEscapeError,
 } from '../../src/lib/db/executor';
+import { createSqliteStatementRunner } from '../../src/lib/db/sqlite';
 import { execRaw, first, isReadOnlyError } from '../../src/lib/db/ops';
 import type { AppTx, DbExecutor } from '../../src/lib/db/types';
 
@@ -420,5 +421,30 @@ describe('the application database', () => {
       return execRaw<{ two: number }>('select 2 as two', tx);
     });
     expect(inside).toEqual([{ two: 2 }]);
+  });
+});
+
+
+describe('Bun SQLite statement detection', () => {
+  it('uses values and object rows when Bun also exposes raw and reader', () => {
+    const statement = {
+      reader: true,
+      columnNames: ['n'],
+      // Bun 1.4 exposes these aliases without better-sqlite3 chaining semantics.
+      raw: vi.fn(() => [[7]]),
+      values: vi.fn(() => [[7]]),
+      all: vi.fn(() => [{ n: 7 }]),
+      run: vi.fn(() => ({ changes: 1, lastInsertRowid: 7 })),
+    };
+    const runner = createSqliteStatementRunner({
+      prepare: () => statement, exec: vi.fn(), inTransaction: false,
+    });
+    expect(runner.values('select 7 as n', [])).toEqual([[7]]);
+    expect(runner.firstValues('select 7 as n', [])).toEqual([7]);
+    expect(runner.query('select 7 as n', [])).toMatchObject({ returnsRows: true, rows: [{ n: 7 }] });
+    statement.columnNames = [];
+    statement.reader = false;
+    expect(runner.query('update demo set n = 7', [])).toMatchObject({ returnsRows: false, changes: 1 });
+    expect(statement.raw).not.toHaveBeenCalled();
   });
 });
